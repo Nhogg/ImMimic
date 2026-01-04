@@ -122,6 +122,10 @@ class BaseConfig(Config):
         self.experiment.rollout.warmstart = 0                       # number of epochs to wait before starting rollouts
         self.experiment.rollout.terminate_on_success = True         # end rollout early after task success
 
+        # for updating the evaluation env meta data
+        self.experiment.env_meta_update_dict = Config()
+        self.experiment.env_meta_update_dict.do_not_lock_keys()
+
     def train_config(self):
         """
         This function populates the `config.train` attribute of the config, which 
@@ -131,8 +135,11 @@ class BaseConfig(Config):
         """
 
         # Path to hdf5 dataset to use for training
-        self.train.data = None                                      
+        self.train.data = None
 
+        # Path to human hdf5 dataset to use for co-training
+        self.train.data_human = None                                      
+                           
         # Write all results to this directory. A new folder with the timestamp will be created
         # in this directory, and it will contain three subfolders - "log", "models", and "videos".
         # The "log" directory will contain tensorboard and stdout txt logs. The "models" directory
@@ -186,6 +193,26 @@ class BaseConfig(Config):
             "dones",
         )
 
+        self.train.action_keys = ["actions"]
+
+        # specifing each action keys to load and their corresponding normalization/conversion requirement
+        # e.g. for dataset keys "action/eef_pos" and "action/eef_rot"
+        # the desired value of self.train.action_config is: 
+        # {
+        #   "action/eef_pos": {
+        #       "normalization": "min_max",
+        #       "rot_conversion: None  
+        #   },
+        #   "action/eef_rot": {
+        #       "normalization": None,
+        #       "rot_conversion: "axis_angle_to_6d"
+        #   }
+        # }
+        self.train.action_config.actions.normalization = None # "min_max"
+        self.train.action_config.actions.rot_conversion = None # "axis_angle_to_6d"
+        # self.train.action_config = {}
+        self.train.action_config.do_not_lock_keys()
+
         # one of [None, "last"] - set to "last" to include goal observations in each batch
         self.train.goal_mode = None
 
@@ -195,6 +222,28 @@ class BaseConfig(Config):
         self.train.batch_size = 100     # batch size
         self.train.num_epochs = 2000    # number of training epochs
         self.train.seed = 1             # seed for training (for reproducibility)
+
+        self.train.data_format = "robomimic" # either "robomimic" or "r2d2"
+
+        self.train.load_model = None        # path to load model from (if any)
+        self.train.action_stats = None
+
+        # interpolation config
+        self.train.interpolate.enabled = False   # whether to interpolate between observations
+        self.train.interpolate.horizon = 10      # number of steps to interpolate over
+        self.train.interpolate.mode = "linear"   # interpolation mode
+
+        self.train.interpolate_human.enabled = False   # whether to interpolate between observations for human data
+        self.train.interpolate_human.horizon = 10      # number of steps to interpolate over for human data
+        self.train.interpolate_human.mode = "linear"   # interpolation mode for human data
+
+        self.train.cotraining = False   # whether to use co-training or not
+
+        self.train.num_human_demo = 100 # number of human demonstrations to use for training
+        self.train.num_robot_demo = 20 # number of robot demonstration
+        self.train.mapping = None # the json file for human datasets to map to the robot datasets
+
+        self.train.mixup = False # whether to use mixup or not
 
     def algo_config(self):
         """
