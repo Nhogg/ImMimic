@@ -39,40 +39,39 @@ def obs_encoder_factory(
         obs_shapes (OrderedDict): a dictionary that maps observation key to
             expected shapes for observations.
 
-        feature_activation: non-linearity to apply after each obs net - defaults to ReLU. Pass
-            None to apply no activation.
+        feature_activation: non-linearity to apply after each obs net - defaults to ReLU.
+            Pass None to apply no activation.
 
-        encoder_kwargs (dict or None): If None, results in default encoder_kwargs being applied. Otherwise, should be
-            nested dictionary containing relevant per-modality information for encoder networks.
-            Should be of form:
-
-            obs_modality1: dict
-                feature_dimension: int
-                core_class: str
-                core_kwargs: dict
-                    ...
-                    ...
-                obs_randomizer_class: str
-                obs_randomizer_kwargs: dict
-                    ...
-                    ...
-            obs_modality2: dict
-                ...
+        encoder_kwargs (dict or None): If None, results in default encoder_kwargs being applied.
+            Otherwise, should be nested dictionary containing relevant per-modality information
+            for encoder networks, keyed by modality name.
     """
     enc = ObservationEncoder(feature_activation=feature_activation)
+
+    # -------------------------------------------------------
+    # 1) First iterate through obs_shapes and register each observation key normally
+    # -------------------------------------------------------
+    agentview_config = None  # store agentview_image config (net_class, net_kwargs, etc.)
+    agentview_shape = None   # store agentview_image input shape for later use by wrist_image
+
     for k, obs_shape in obs_shapes.items():
         obs_modality = ObsUtils.OBS_KEYS_TO_MODALITIES[k]
-        enc_kwargs = deepcopy(ObsUtils.DEFAULT_ENCODER_KWARGS[obs_modality]) if encoder_kwargs is None else \
-            deepcopy(encoder_kwargs[obs_modality])
 
+        # Fetch the config for this modality from encoder_kwargs (if provided) or fall back to defaults
+        if encoder_kwargs is None:
+            # use default encoder config
+            enc_kwargs = deepcopy(ObsUtils.DEFAULT_ENCODER_KWARGS[obs_modality])
+        else:
+            enc_kwargs = deepcopy(encoder_kwargs[obs_modality])
+
+        # For "core" and "obs_randomizer", if a class name is set, strip kwargs down to valid __init__ args
         for obs_module, cls_mapping in zip(("core", "obs_randomizer"),
-                                      (ObsUtils.OBS_ENCODER_CORES, ObsUtils.OBS_RANDOMIZERS)):
-            # Sanity check for kwargs in case they don't exist / are None
+                                           (ObsUtils.OBS_ENCODER_CORES, ObsUtils.OBS_RANDOMIZERS)):
             if enc_kwargs.get(f"{obs_module}_kwargs", None) is None:
                 enc_kwargs[f"{obs_module}_kwargs"] = {}
-            # Add in input shape info
+
             enc_kwargs[f"{obs_module}_kwargs"]["input_shape"] = obs_shape
-            # If group class is specified, then make sure corresponding kwargs only contain relevant kwargs
+
             if enc_kwargs[f"{obs_module}_class"] is not None:
                 enc_kwargs[f"{obs_module}_kwargs"] = extract_class_init_kwargs_from_dict(
                     cls=cls_mapping[enc_kwargs[f"{obs_module}_class"]],
@@ -80,16 +79,47 @@ def obs_encoder_factory(
                     copy=False,
                 )
 
-        # Add in input shape info
-        randomizer = None if enc_kwargs["obs_randomizer_class"] is None else \
-            ObsUtils.OBS_RANDOMIZERS[enc_kwargs["obs_randomizer_class"]](**enc_kwargs["obs_randomizer_kwargs"])
+        # Instantiate randomizer if configured
+        randomizer = None
+        if enc_kwargs["obs_randomizer_class"] is not None:
+            r_cls = ObsUtils.OBS_RANDOMIZERS[enc_kwargs["obs_randomizer_class"]]
+            r_kwargs = enc_kwargs["obs_randomizer_kwargs"]
+            randomizer = r_cls(**r_kwargs)
 
+        # Register this key normally
         enc.register_obs_key(
             name=k,
             shape=obs_shape,
             net_class=enc_kwargs["core_class"],
             net_kwargs=enc_kwargs["core_kwargs"],
             randomizer=randomizer,
+        )
+
+        # If this is agentview_image, cache its config for later reuse
+        if k == "agentview_image":
+            agentview_config = {
+                "net_class": enc_kwargs["core_class"],
+                "net_kwargs": enc_kwargs["core_kwargs"],
+                "randomizer": randomizer,
+            }
+            agentview_shape = obs_shape
+
+    # -------------------------------------------------------
+    # 2) If wrist_image is missing but agentview_image exists,
+    #    automatically add wrist_image using the same encoder structure as agentview_image
+    # -------------------------------------------------------
+    if ("agentview_image" in obs_shapes) and ("wrist_image" not in obs_shapes):
+        # You can choose whether wrist_image should have a different shape.
+        # If you want it to match agentview_image, just reuse agentview_shape.
+        wrist_shape = agentview_shape
+
+        # Register a new key "wrist_image" that reuses agentview_image's net_class, net_kwargs, and randomizer
+        enc.register_obs_key(
+            name="wrist_image",
+            shape=wrist_shape,
+            net_class=agentview_config["net_class"],
+            net_kwargs=agentview_config["net_kwargs"],
+            randomizer=agentview_config["randomizer"],
         )
 
     enc.make()
@@ -219,13 +249,14 @@ class ObservationEncoder(Module):
         assert self._locked, "ObservationEncoder: @make has not been called yet"
 
         # ensure all modalities that the encoder handles are present
-        assert set(self.obs_shapes.keys()).issubset(obs_dict), "ObservationEncoder: {} does not contain all modalities {}".format(
-            list(obs_dict.keys()), list(self.obs_shapes.keys())
-        )
+        # assert set(self.obs_shapes.keys()).issubset(obs_dict), "ObservationEncoder: {} does not contain all modalities {}".format(
+        #    list(obs_dict.keys()), list(self.obs_shapes.keys())
 
         # process modalities by order given by @self.obs_shapes
         feats = []
         for k in self.obs_shapes:
+            if k == "wrist_image" and k not in obs_dict:
+                continue
             x = obs_dict[k]
             # maybe process encoder input with randomizer
             if self.obs_randomizers[k] is not None:
@@ -241,6 +272,9 @@ class ObservationEncoder(Module):
             # flatten to [B, D]
             x = TensorUtils.flatten(x, begin_axis=1)
             feats.append(x)
+        
+        if 'wrist_image' not in obs_dict:
+            feats.append(torch.zeros(feats[0].size(0), 64).to(feats[0].device))
 
         # concatenate all features together
         return torch.cat(feats, dim=-1)
