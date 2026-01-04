@@ -3,6 +3,7 @@ This file contains the robosuite environment wrapper that is used
 to provide a standardized environment API for training policies and interacting
 with metadata present in datasets.
 """
+import os
 import json
 import numpy as np
 from copy import deepcopy
@@ -11,17 +12,7 @@ import robosuite
 import robosuite.utils.transform_utils as T
 try:
     # this is needed for ensuring robosuite can find the additional mimicgen environments (see https://mimicgen.github.io)
-    import mimicgen
-except ImportError:
-    pass
-try:
-    # deprecated version of mimicgen
     import mimicgen_envs
-except ImportError:
-    pass
-try:
-    # this is needed for ensuring robosuite can find the additional robocasa environments (see https://robocasa.ai)
-    import robocasa
 except ImportError:
     pass
 
@@ -89,18 +80,21 @@ class EnvRobosuite(EB.EnvBase):
             use_camera_obs=use_image_obs,
             camera_depths=use_depth_obs,
         )
-        if render and self.is_v15_or_higher:
-            update_kwargs["renderer"] = "mujoco"
         kwargs.update(update_kwargs)
 
         if self._is_v1:
             if kwargs["has_offscreen_renderer"]:
-                # ensure that we select the correct GPU device for rendering by testing for EGL rendering
-                # NOTE: this package should be installed from this link (https://github.com/StanfordVL/egl_probe)
-                import egl_probe
-                valid_gpu_devices = egl_probe.get_available_devices()
-                if len(valid_gpu_devices) > 0:
-                    kwargs["render_gpu_device_id"] = valid_gpu_devices[0]
+                cuda_visible_device = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+                if cuda_visible_device.isnumeric():
+                    # assume that user specified a specific GPU ID
+                    kwargs["render_gpu_device_id"] = int(cuda_visible_device)
+                else:
+                    # ensure that we select the correct GPU device for rendering by testing for EGL rendering
+                    # NOTE: this package should be installed from this link (https://github.com/StanfordVL/egl_probe)
+                    import egl_probe
+                    valid_gpu_devices = egl_probe.get_available_devices()
+                    if len(valid_gpu_devices) > 0:
+                        kwargs["render_gpu_device_id"] = valid_gpu_devices[0]
         else:
             # make sure gripper visualization is turned off (we almost always want this for learning)
             kwargs["gripper_visualization"] = False
@@ -134,21 +128,13 @@ class EnvRobosuite(EB.EnvBase):
         obs = self.get_observation(obs)
         return obs, r, self.is_done(), info
 
-    def reset(self, unset_ep_meta=True):
+    def reset(self):
         """
         Reset environment.
 
-        Args:
-            unset_ep_meta (np.array): whether to reset any previously set episode metadata (otherwise
-                will continue to use previous episode metadata)
-        
         Returns:
             observation (dict): initial observation dictionary.
         """
-        if unset_ep_meta and self.is_v15_or_higher:
-            # unset the ep meta to clear out any ep meta that was previously set
-            # (this feature was set from robosuite v1.5 onwards)
-            self.env.unset_ep_meta()
         di = self.env.reset()
         return self.get_observation(di)
 
@@ -167,18 +153,7 @@ class EnvRobosuite(EB.EnvBase):
         """
         should_ret = False
         if "model" in state:
-            if state.get("ep_meta", None) is not None:
-                # set relevant episode information
-                ep_meta = json.loads(state["ep_meta"])
-            else:
-                ep_meta = {}
-
-            if self.is_v15_or_higher: # newer versions of robosuite have this feature
-                self.env.set_ep_meta(ep_meta)
-            # this reset is necessary.
-            # while the call to env.reset_from_xml_string does call reset,
-            # that is only a "soft" reset that doesn't actually reload the model.
-            self.reset(unset_ep_meta=False)
+            self.reset()
             robosuite_version_id = int(robosuite.__version__.split(".")[1])
             if robosuite_version_id <= 3:
                 from robosuite.utils.mjcf_utils import postprocess_model_xml
@@ -220,9 +195,9 @@ class EnvRobosuite(EB.EnvBase):
             return self.env.render()
         elif mode == "rgb_array":
             im = self.env.sim.render(height=height, width=width, camera_name=camera_name)
-            # if self.use_depth_obs:
-            #     # render() returns a tuple when self.use_depth_obs=True
-            #     return im[0][::-1]
+            if self.use_depth_obs:
+                # render() returns a tuple when self.use_depth_obs=True
+                return im[0][::-1]
             return im[::-1]
         else:
             raise NotImplementedError("mode={} is not implemented".format(mode))
@@ -249,7 +224,16 @@ class EnvRobosuite(EB.EnvBase):
                 ret[k] = di[k][::-1]
                 if len(ret[k].shape) == 2:
                     ret[k] = ret[k][..., None] # (H, W, 1)
-                assert len(ret[k].shape) == 3 
+                assert len(ret[k].shape) == 3
+                # scale entries in depth map to correspond to real distance.
+                ret[k] = self.get_real_depth_map(ret[k])
+                if self.postprocess_visual_obs:
+                    ret[k] = ObsUtils.process_obs(obs=ret[k], obs_key=k)
+            elif (k in ObsUtils.OBS_KEYS_TO_MODALITIES) and ObsUtils.key_is_obs_modality(key=k, obs_modality="depth"):
+                ret[k] = di[k][::-1]
+                if len(ret[k].shape) == 2:
+                    ret[k] = ret[k][..., None] # (H, W, 1)
+                assert len(ret[k].shape) == 3
                 # scale entries in depth map to correspond to real distance.
                 ret[k] = self.get_real_depth_map(ret[k])
                 if self.postprocess_visual_obs:
@@ -355,11 +339,7 @@ class EnvRobosuite(EB.EnvBase):
         """
         xml = self.env.sim.model.get_xml() # model xml file
         state = np.array(self.env.sim.get_state().flatten()) # simulator state
-        info = dict(model=xml, states=state)
-        if self.is_v15_or_higher:
-            # get ep_meta if applicable for newer versions of robosuite
-            info["ep_meta"] = json.dumps(self.env.get_ep_meta(), indent=4)
-        return info
+        return dict(model=xml, states=state)
 
     def get_reward(self):
         """
@@ -421,15 +401,6 @@ class EnvRobosuite(EB.EnvBase):
         """
         return EB.EnvType.ROBOSUITE_TYPE
 
-    @property
-    def is_v15_or_higher(self):
-        """
-        Returns true if the robosuite version is v1.5.0+
-        """
-        main_version = int(robosuite.__version__.split(".")[0])
-        sub_version = int(robosuite.__version__.split(".")[1])
-        return (main_version > 1) or (main_version == 1 and sub_version >= 5)
-    
     @property
     def version(self):
         """

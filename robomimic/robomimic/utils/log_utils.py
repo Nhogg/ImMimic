@@ -27,14 +27,19 @@ class PrintLogger(object):
         print('STDOUT will be forked to %s' % log_file)
         self.log_file = open(log_file, "a")
 
+    def fileno(self):
+        return self.terminal.fileno()
+
     def write(self, message):
         self.terminal.write(message)
         self.log_file.write(message)
         self.log_file.flush()
 
     def flush(self):
-        # ensure stdout gets flushed
-        self.terminal.flush()
+        # this flush method is needed for python 3 compatibility.
+        # this handles the flush command by doing nothing.
+        # you might want to specify some extra behavior here.
+        pass
 
 
 class DataLogger(object):
@@ -58,7 +63,7 @@ class DataLogger(object):
         if log_wandb:
             import wandb
             import robomimic.macros as Macros
-            
+
             # set up wandb api key if specified in macros
             if Macros.WANDB_API_KEY is not None:
                 os.environ["WANDB_API_KEY"] = Macros.WANDB_API_KEY
@@ -66,7 +71,7 @@ class DataLogger(object):
             assert Macros.WANDB_ENTITY is not None, "WANDB_ENTITY macro is set to None." \
                     "\nSet this macro in {base_path}/macros_private.py" \
                     "\nIf this file does not exist, first run python {base_path}/scripts/setup_macros.py".format(base_path=robomimic.__path__[0])
-            
+
             # attempt to set up wandb 10 times. If unsuccessful after these trials, don't use wandb
             num_attempts = 10
             for attempt in range(num_attempts):

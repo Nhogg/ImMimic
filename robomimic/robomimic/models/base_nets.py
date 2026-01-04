@@ -14,9 +14,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms
 from torchvision import models as vision_models
+from torchvision import transforms
 
 import robomimic.utils.tensor_utils as TensorUtils
-import robomimic.utils.obs_utils as ObsUtils
 
 
 CONV_ACTIVATIONS = {
@@ -57,7 +57,6 @@ def transformer_args_from_config(transformer_config):
         transformer_activation=transformer_config.activation,
         transformer_nn_parameter_for_timesteps=transformer_config.nn_parameter_for_timesteps,
     )
-    
     if "num_layers" in transformer_config:
         transformer_args["transformer_num_layers"] = transformer_config.num_layers
 
@@ -464,20 +463,6 @@ class ConvBase(Module):
     def __init__(self):
         super(ConvBase, self).__init__()
 
-    def __init_subclass__(cls, **kwargs):
-        """
-        Hook method to automatically register all valid subclasses so we can keep track of valid observation encoders
-        in a global dict.
-
-        This global dict stores mapping from observation encoder network name to class.
-        We keep track of these registries to enable automated class inference at runtime, allowing
-        users to simply extend our base encoder class and refer to that class in string form
-        in their config, without having to manually register their class internally.
-        This also future-proofs us for any additional encoder classes we would
-        like to add ourselves.
-        """
-        ObsUtils.register_encoder_backbone(cls)
-
     # dirty hack - re-implement to pass the buck onto subclasses from ABC parent
     def output_shape(self, input_shape):
         """
@@ -866,7 +851,6 @@ class Conv1dBase(Module):
 
         # Get activation requested
         activation = CONV_ACTIVATIONS[activation]
-        
         # Add layer kwargs
         conv_kwargs["out_channels"] = out_channels
         conv_kwargs["kernel_size"] = kernel_size

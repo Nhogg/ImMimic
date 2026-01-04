@@ -34,7 +34,6 @@ class EncoderCore(BaseNets.Module):
     """
     Abstract class used to categorize all cores used to encode observations
     """
-
     def __init__(self, input_shape):
         self.input_shape = input_shape
         super(EncoderCore, self).__init__()
@@ -98,9 +97,7 @@ class VisualCore(EncoderCore, BaseNets.ConvBase):
         backbone_kwargs["input_channel"] = input_shape[0]
 
         # extract only relevant kwargs for this specific backbone
-        backbone_kwargs = extract_class_init_kwargs_from_dict(
-                cls = ObsUtils.OBS_ENCODER_BACKBONES[backbone_class],
-                dic=backbone_kwargs, copy=True)
+        backbone_kwargs = extract_class_init_kwargs_from_dict(cls=eval(backbone_class), dic=backbone_kwargs, copy=True)
 
         # visual backbone
         assert isinstance(backbone_class, str)
@@ -784,7 +781,7 @@ class GaussianNoiseRandomizer(Randomizer):
         out = TensorUtils.repeat_by_expand_at(inputs, repeats=self.num_samples, dim=0)
 
         # Sample noise across all samples
-        out = torch.rand(size=out.shape).to(inputs.device) * self.noise_std + self.noise_mean + out
+        out = torch.randn(size=out.shape).to(inputs.device) * self.noise_std + self.noise_mean + out
 
         # Possibly clamp
         if self.limits is not None:

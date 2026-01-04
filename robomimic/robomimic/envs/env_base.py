@@ -14,6 +14,8 @@ class EnvType:
     ROBOSUITE_TYPE = 1
     GYM_TYPE = 2
     IG_MOMART_TYPE = 3
+    REAL_TYPE = 6
+    GPRS_REAL_TYPE = 7
 
 
 class EnvBase(abc.ABC):
