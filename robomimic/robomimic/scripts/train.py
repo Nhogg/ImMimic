@@ -32,6 +32,7 @@ import torch
 from torch.utils.data import DataLoader
 
 import robomimic
+import robomimic.macros as Macros
 import robomimic.utils.train_utils as TrainUtils
 import robomimic.utils.torch_utils as TorchUtils
 import robomimic.utils.obs_utils as ObsUtils
@@ -42,10 +43,13 @@ from robomimic.algo import algo_factory, RolloutPolicy
 from robomimic.utils.log_utils import PrintLogger, DataLogger, flush_warnings
 
 
-def train(config, device):
+def train(config, device, auto_remove_exp=False):
     """
     Train a model using the algorithm.
     """
+
+    # time this run
+    start_time = time.time()
 
     # first set seeds
     np.random.seed(config.train.seed)
@@ -56,7 +60,7 @@ def train(config, device):
     print("\n============= New Training Run with Config =============")
     print(config)
     print("")
-    log_dir, ckpt_dir, video_dir = TrainUtils.get_exp_dir(config)
+    log_dir, ckpt_dir, video_dir = TrainUtils.get_exp_dir(config, auto_remove_exp_dir=auto_remove_exp)
 
     if config.experiment.logging.terminal_output_to_txt:
         # log stdout and stderr to a text file
@@ -68,16 +72,39 @@ def train(config, device):
     ObsUtils.initialize_obs_utils_with_config(config)
 
     # make sure the dataset exists
-    dataset_path = os.path.expanduser(config.train.data)
+    if isinstance(config.train.data, str):
+        dataset_path = os.path.expandvars(os.path.expanduser(config.train.data))
+    else:
+        eval_dataset_cfg = config.train.data[0]
+        dataset_path = os.path.expandvars(os.path.expanduser(eval_dataset_cfg["path"]))
+    ds_format = config.train.data_format
     if not os.path.exists(dataset_path):
         raise Exception("Dataset at provided path {} not found!".format(dataset_path))
 
+    # if co-training, make sure the human dataset exists
+    if config.train.cotraining:
+        if isinstance(config.train.data_human, str):
+            dataset_human_path = os.path.expandvars(os.path.expanduser(config.train.data_human))
+        else:
+            print(config.train.data_human)
+            eval_dataset_human_cfg = config.train.data_human[0]
+            dataset_human_path = os.path.expandvars(os.path.expanduser(eval_dataset_human_cfg["path"]))
+        if not os.path.exists(dataset_human_path):
+            raise Exception("Human dataset at provided path {} not found!".format(dataset_human_path))
+
     # load basic metadata from training file
     print("\n============= Loaded Environment Metadata =============")
-    env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=config.train.data)
+    env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=dataset_path, ds_format=ds_format)
+
+    # update env meta if applicable
+    from robomimic.utils.script_utils import deep_update
+    deep_update(env_meta, config.experiment.env_meta_update_dict)
+
     shape_meta = FileUtils.get_shape_metadata_from_dataset(
-        dataset_path=config.train.data,
+        dataset_path=dataset_path,
+        action_keys=config.train.action_keys,
         all_obs_keys=config.all_obs_keys,
+        ds_format=ds_format,
         verbose=True
     )
 
@@ -99,7 +126,7 @@ def train(config, device):
             env = EnvUtils.create_env_from_metadata(
                 env_meta=env_meta,
                 env_name=env_name, 
-                render=False, 
+                render=config.experiment.render,
                 render_offscreen=config.experiment.render_video,
                 use_image_obs=shape_meta["use_images"],
                 use_depth_obs=shape_meta["use_depths"],
@@ -129,6 +156,16 @@ def train(config, device):
     with open(os.path.join(log_dir, '..', 'config.json'), 'w') as outfile:
         json.dump(config, outfile, indent=4)
 
+    # load checkpoint
+    if config.train.load_model is not None:
+        checkpoint_path = os.path.join(config.train.load_model)
+        if os.path.exists(checkpoint_path):
+            model_dict = torch.load(checkpoint_path, map_location="cpu")["model"]
+            model.deserialize(model_dict)
+            print("Loaded model from {}".format(config.train.load_model))
+        else:
+            print(f"Checkpoint not found at {checkpoint_path}")
+
     print("\n============= Model Summary =============")
     print(model)  # print model summary
     print("")
@@ -144,21 +181,70 @@ def train(config, device):
         print("\n============= Validation Dataset =============")
         print(validset)
         print("")
+    
+    # if co-training, load the human dataset
+    if config.train.cotraining:
+        trainset_human, validset_human = TrainUtils.load_data_for_training(
+            config, obs_keys=shape_meta["all_obs_keys"], dataset_path=dataset_human_path, dataset_human=True)
+        train_sampler_human = trainset_human.get_dataset_sampler()
+        print("\n============= Human Training Dataset =============")
+        print(trainset_human)
+        print("")
+        if validset_human is not None:
+            print("\n============= Human Validation Dataset =============")
+            print(validset_human)
+            print("")
 
     # maybe retreve statistics for normalizing observations
     obs_normalization_stats = None
     if config.train.hdf5_normalize_obs:
         obs_normalization_stats = trainset.get_obs_normalization_stats()
 
-    # initialize data loaders
-    train_loader = DataLoader(
-        dataset=trainset,
-        sampler=train_sampler,
-        batch_size=config.train.batch_size,
-        shuffle=(train_sampler is None),
-        num_workers=config.train.num_data_workers,
-        drop_last=True
-    )
+    # maybe retreve statistics for normalizing actions
+    if config.train.action_stats == None:
+        raise NotImplementedError
+    else:
+        json_path = config.train.action_stats
+        with open(json_path, "r") as f:
+            action_normalization_stats = json.load(f, object_pairs_hook=OrderedDict)
+            action_normalization_stats["action_absolute"]["scale"] = np.array(action_normalization_stats["action_absolute"]["scale"])
+            action_normalization_stats["action_absolute"]["offset"] = np.array(action_normalization_stats["action_absolute"]["offset"])
+            trainset.action_normalization_stats = action_normalization_stats
+            if config.train.cotraining:
+                trainset_human.action_normalization_stats = action_normalization_stats
+                trainset_human.pair = True
+    print(action_normalization_stats)
+
+    # if co-training, create a human data loader
+    if config.train.cotraining:
+        train_loader = DataLoader(
+            dataset=trainset,
+            sampler=train_sampler,
+            batch_size=config.train.batch_size,
+            shuffle=(train_sampler is None),
+            num_workers=config.train.num_data_workers//2,
+            drop_last=True
+        )
+        if config.train.mixup:
+            trainset_human.num_robot_demo_for_mixup = trainset.num_demo
+        train_loader_human = DataLoader(
+            dataset=trainset_human,
+            sampler=train_sampler_human,
+            batch_size=config.train.batch_size,
+            shuffle=(train_sampler_human is None),
+            num_workers=config.train.num_data_workers//2,
+            drop_last=True
+        )
+    else:
+        # initialize data loaders
+        train_loader = DataLoader(
+            dataset=trainset,
+            sampler=train_sampler,
+            batch_size=config.train.batch_size,
+            shuffle=(train_sampler is None),
+            num_workers=config.train.num_data_workers,
+            drop_last=True
+        )
 
     if config.experiment.validate:
         # cap num workers for validation dataset at 1
@@ -172,8 +258,11 @@ def train(config, device):
             num_workers=num_workers,
             drop_last=True
         )
+        raise Exception("Validation dataset not supported!")
     else:
         valid_loader = None
+        if config.train.cotraining:
+            valid_loader_human = None
 
     # print all warnings before training begins
     print("*" * 50)
@@ -188,17 +277,31 @@ def train(config, device):
     best_success_rate = {k: -1. for k in envs} if config.experiment.rollout.enabled else None
     last_ckpt_time = time.time()
 
+    need_sync_results = (Macros.RESULTS_SYNC_PATH_ABS is not None)
+    if need_sync_results:
+        # these paths will be updated after each evaluation
+        best_ckpt_path_synced = None
+        best_video_path_synced = None
+        last_ckpt_path_synced = None
+        last_video_path_synced = None
+        log_dir_path_synced = os.path.join(Macros.RESULTS_SYNC_PATH_ABS, "logs")
+
     # number of learning steps per epoch (defaults to a full dataset pass)
     train_num_steps = config.experiment.epoch_every_n_steps
     valid_num_steps = config.experiment.validation_epoch_every_n_steps
 
     for epoch in range(1, config.train.num_epochs + 1): # epoch numbers start at 1
+        model.alpha = max(0, 1 - epoch / 300)
+        print(f'mixup alpha: {model.alpha}')
         step_log = TrainUtils.run_epoch(
             model=model,
             data_loader=train_loader,
             epoch=epoch,
             num_steps=train_num_steps,
             obs_normalization_stats=obs_normalization_stats,
+            data_loader_human=train_loader_human if config.train.cotraining else None, # pass in human loader if cotraining
+            robot_dataset=trainset, # pass in robot dataset if need mixup
+            mixup=config.train.mixup, # mixup or not 
         )
         model.on_epoch_end(epoch)
 
@@ -240,24 +343,18 @@ def train(config, device):
             print("Validation Epoch {}".format(epoch))
             print(json.dumps(step_log, sort_keys=True, indent=4))
 
-            # save checkpoint if achieve new best validation loss
-            valid_check = "Loss" in step_log
-            if valid_check and (best_valid_loss is None or (step_log["Loss"] <= best_valid_loss)):
-                best_valid_loss = step_log["Loss"]
-                if config.experiment.save.enabled and config.experiment.save.on_best_validation:
-                    epoch_ckpt_name += "_best_validation_{}".format(best_valid_loss)
-                    should_save_ckpt = True
-                    ckpt_reason = "valid" if ckpt_reason is None else ckpt_reason
-
-        # Evaluate the model by by running rollouts
-
         # do rollouts at fixed rate or if it's time to save a new ckpt
         video_paths = None
         rollout_check = (epoch % config.experiment.rollout.rate == 0) or (should_save_ckpt and ckpt_reason == "time")
+        did_rollouts = False
         if config.experiment.rollout.enabled and (epoch > config.experiment.rollout.warmstart) and rollout_check:
 
             # wrap model as a RolloutPolicy to prepare for rollouts
-            rollout_model = RolloutPolicy(model, obs_normalization_stats=obs_normalization_stats)
+            rollout_model = RolloutPolicy(
+                model,
+                obs_normalization_stats=obs_normalization_stats,
+                action_normalization_stats=action_normalization_stats,
+            )
 
             num_episodes = config.experiment.rollout.n
             all_rollout_logs, video_paths = TrainUtils.rollout_with_stats(
@@ -301,6 +398,7 @@ def train(config, device):
             should_save_ckpt = (config.experiment.save.enabled and updated_stats["should_save_ckpt"]) or should_save_ckpt
             if updated_stats["ckpt_reason"] is not None:
                 ckpt_reason = updated_stats["ckpt_reason"]
+            did_rollouts = True
 
         # Only keep saved videos if the ckpt should be saved (but not because of validation score)
         should_save_video = (should_save_ckpt and (ckpt_reason != "valid")) or config.experiment.keep_all_videos
@@ -317,6 +415,66 @@ def train(config, device):
                 shape_meta=shape_meta,
                 ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"),
                 obs_normalization_stats=obs_normalization_stats,
+                action_normalization_stats=action_normalization_stats,
+            )
+
+        # maybe sync some results back to scratch space (only if rollouts happened)
+        if False:
+            print("Sync results back to sync path: {}".format(Macros.RESULTS_SYNC_PATH_ABS))
+
+            # get best and latest model checkpoints and videos
+            best_ckpt_path_to_sync, best_video_path_to_sync, best_epoch_to_sync = TrainUtils.get_model_from_output_folder(
+                models_path=ckpt_dir,
+                videos_path=video_dir if config.experiment.render_video else None,
+                best=True,
+            )
+            last_ckpt_path_to_sync, last_video_path_to_sync, last_epoch_to_sync = TrainUtils.get_model_from_output_folder(
+                models_path=ckpt_dir,
+                videos_path=video_dir if config.experiment.render_video else None,
+                last=True,
+            )
+
+            # clear last files that we synced over
+            if best_ckpt_path_synced is not None:
+                os.remove(best_ckpt_path_synced)
+            if last_ckpt_path_synced is not None:
+                os.remove(last_ckpt_path_synced)
+            if best_video_path_synced is not None:
+                os.remove(best_video_path_synced)
+            if last_video_path_synced is not None:
+                os.remove(last_video_path_synced)
+            if os.path.exists(log_dir_path_synced):
+                shutil.rmtree(log_dir_path_synced)
+
+            # set write paths and sync new files over
+            best_success_rate_for_sync = float(best_ckpt_path_to_sync.split("success_")[-1][:-4])
+            best_ckpt_path_synced = os.path.join(
+                Macros.RESULTS_SYNC_PATH_ABS,
+                os.path.basename(best_ckpt_path_to_sync)[:-4] + "_best.pth",
+            )
+            shutil.copyfile(best_ckpt_path_to_sync, best_ckpt_path_synced)
+            last_ckpt_path_synced = os.path.join(
+                Macros.RESULTS_SYNC_PATH_ABS,
+                os.path.basename(last_ckpt_path_to_sync)[:-4] + "_last.pth",
+            )
+            shutil.copyfile(last_ckpt_path_to_sync, last_ckpt_path_synced)
+            if config.experiment.render_video:
+                best_video_path_synced = os.path.join(
+                    Macros.RESULTS_SYNC_PATH_ABS,
+                    os.path.basename(best_video_path_to_sync)[:-4] + "_best_{}.mp4".format(best_success_rate_for_sync),
+                )
+                shutil.copyfile(best_video_path_to_sync, best_video_path_synced)
+                last_video_path_synced = os.path.join(
+                    Macros.RESULTS_SYNC_PATH_ABS,
+                    os.path.basename(last_video_path_to_sync)[:-4] + "_last.mp4",
+                )
+                shutil.copyfile(last_video_path_to_sync, last_video_path_synced)
+            # sync logs dir
+            shutil.copytree(log_dir, log_dir_path_synced)
+            # sync config json
+            shutil.copyfile(
+                os.path.join(log_dir, '..', 'config.json'),
+                os.path.join(Macros.RESULTS_SYNC_PATH_ABS, 'config.json')
             )
 
         # Finally, log memory usage in MB
@@ -327,6 +485,41 @@ def train(config, device):
 
     # terminate logging
     data_logger.close()
+
+    # sync logs after closing data logger to make sure everything was transferred
+    if need_sync_results:
+        print("Sync results back to sync path: {}".format(Macros.RESULTS_SYNC_PATH_ABS))
+        # sync logs dir
+        if os.path.exists(log_dir_path_synced):
+            shutil.rmtree(log_dir_path_synced)
+        shutil.copytree(log_dir, log_dir_path_synced)
+
+    # collect important statistics
+    important_stats = dict()
+    prefix = "Rollout/Success_Rate/"
+    exception_prefix = "Rollout/Exception_Rate/"
+    for k in data_logger._data:
+        if k.startswith(prefix):
+            suffix = k[len(prefix):]
+            stats = data_logger.get_stats(k)
+            important_stats["{}-max".format(suffix)] = stats["max"]
+            important_stats["{}-mean".format(suffix)] = stats["mean"]
+        elif k.startswith(exception_prefix):
+            suffix = k[len(exception_prefix):]
+            stats = data_logger.get_stats(k)
+            important_stats["{}-exception-rate-max".format(suffix)] = stats["max"]
+            important_stats["{}-exception-rate-mean".format(suffix)] = stats["mean"]
+
+    # add in time taken
+    important_stats["time spent (hrs)"] = "{:.2f}".format((time.time() - start_time) / 3600.)
+
+    # write stats to disk
+    json_file_path = os.path.join(log_dir, "important_stats.json")
+    with open(json_file_path, 'w') as f:
+        # preserve original key ordering
+        json.dump(important_stats, f, sort_keys=False, indent=4)
+
+    return important_stats
 
 
 def main(args):
@@ -342,16 +535,24 @@ def main(args):
         config = config_factory(args.algo)
 
     if args.dataset is not None:
-        config.train.data = args.dataset
+        config.train.data = [dict(path=args.dataset)]
+
+    if config.train.cotraining and args.dataset_human is not None:
+        config.train.data_human = [dict(path=args.dataset_human)]
 
     if args.name is not None:
         config.experiment.name = args.name
+
+    if args.output is not None:
+        config.train.output_dir = args.output
 
     # get torch device
     device = TorchUtils.get_torch_device(try_to_use_cuda=config.train.cuda)
 
     # maybe modify config for debugging purposes
     if args.debug:
+        Macros.DEBUG = True
+
         # shrink length of training to test whether this run is likely to crash
         config.unlock()
         config.lock_keys()
@@ -374,11 +575,33 @@ def main(args):
 
     # catch error during training and print it
     res_str = "finished run successfully!"
+    important_stats = None
     try:
-        train(config, device=device)
+        important_stats = train(config, device=device, auto_remove_exp=args.auto_remove_exp)
     except Exception as e:
         res_str = "run failed with error:\n{}\n\n{}".format(e, traceback.format_exc())
     print(res_str)
+    if important_stats is not None:
+        important_stats = json.dumps(important_stats, indent=4)
+        print("\nRollout Success Rate Stats")
+        print(important_stats)
+
+        # maybe sync important stats back
+        if Macros.RESULTS_SYNC_PATH_ABS is not None:
+            json_file_path = os.path.join(Macros.RESULTS_SYNC_PATH_ABS, "important_stats.json")
+            with open(json_file_path, 'w') as f:
+                # preserve original key ordering
+                json.dump(important_stats, f, sort_keys=False, indent=4)
+
+    # maybe give slack notification
+    if Macros.SLACK_TOKEN is not None:
+        from robomimic.scripts.give_slack_notification import give_slack_notif
+        msg = "Completed the following training run!\nHostname: {}\nExperiment Name: {}\n".format(socket.gethostname(), config.experiment.name)
+        msg += "```{}```".format(res_str)
+        if important_stats is not None:
+            msg += "\nRollout Success Rate Stats"
+            msg += "\n```{}```".format(important_stats)
+        give_slack_notif(msg)
 
 
 if __name__ == "__main__":
@@ -409,11 +632,35 @@ if __name__ == "__main__":
     )
 
     # Dataset path, to override the one in the config
+    # When co-training, this is dataset path for the robot dataset
     parser.add_argument(
         "--dataset",
         type=str,
         default=None,
         help="(optional) if provided, override the dataset path defined in the config",
+    )
+
+    # Second dataset path for cotraining, to override the one in the config
+    parser.add_argument(
+        "--dataset_human",
+        type=str,
+        default=None,
+        help="(optional) if provided, override the dataset path defined in the config",
+    )
+
+    # Output path, to override the one in the config
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="(optional) if provided, override the output folder path defined in the config",
+    )
+
+    # force delete the experiment folder if it exists
+    parser.add_argument(
+        "--auto-remove-exp",
+        action='store_true',
+        help="force delete the experiment folder if it exists"
     )
 
     # debug mode
