@@ -35,7 +35,7 @@ class Args:
     horizon: int = 10000                     # number of steps in the rollout
     camera_config_dict = camera_config_dict  # path to or dict for camera config
     controller_type: str = "OSC_POSE"
-    gripper_type: str = "robotiq"            # ['umi', 'robotiq', 'allegro', 'ability']
+    gripper_type: str = "umi"            # ['umi', 'robotiq', 'allegro', 'ability']
     control_rate_hz: float = 30.0             # control process rate, how fast we send to Deoxys
     seed: int = 1                            # seed for rollout
     n_rollouts: int = 1                      # number of rollouts
