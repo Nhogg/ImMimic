@@ -1,1 +1,4 @@
 robosuite/
+robomimic/robomimic/datasets/*.hdf5
+robomimic/robomimic/datasets/*.json
+robomimic/robomimic/exps/policy_trained_models
