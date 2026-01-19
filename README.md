@@ -1,4 +1,49 @@
-# ImMimic-CoRL2025
+<div align="center">
+
+# ImMimic: Cross-Domain Imitation from Human Videos via Mapping and Interpolation
+
+**Yangcen Liu\*** · **Woo Chul Shin\*** · Yunhai Han · Zhenyang Chen · <br/> Harish Ravichandar · Danfei Xu  
+Georgia Institute of Technology · CoRL 2025 (<span style="color:#ff0000; font-weight:700;">Oral</span>)  
+(\* equal contribution)
+
+<br/>
+
+<a href="https://arxiv.org/abs/2509.10952">Paper</a>
+&nbsp;·&nbsp;
+<a href="https://sites.google.com/view/immimic">Project Page</a>
+&nbsp;·&nbsp;
+<a href="https://github.com/GaTech-RL2/ImMimic-CoRL2025">Code</a>
+&nbsp;·&nbsp;
+<a href="https://drive.google.com/drive/folders/1IaLEeQNYUdXy4hYmAogrjR-jAjqiqORu?usp=drive_link">Data</a>
+&nbsp;·&nbsp;
+<a href="https://www.youtube.com/watch?v=PbjVB8QQjpo">Video</a>
+
+</div>
+
+<p align="center">
+  <a href="https://rl2.cc.gatech.edu/">
+    <img src="assets/rl2_logo.png" height="42" alt="RL2 Lab"/>
+  </a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://star-lab.cc.gatech.edu/">
+    <img src="assets/starlab_logo.png" height="42" alt="STAR Lab"/>
+  </a>
+</p>
+
+
+## Overview
+ImMimic is an embodiment-agnostic co-training framework that leverages abundant human videos and a small amount of teleoperated robot demonstrations. It bridges domain gaps via (1) retargeted human hand trajectories as action supervision, (2) DTW mapping (action- or visual-based), and (3) MixUp interpolation in latent/action space to create intermediate domains for adaptation.
+
+<p align="center">
+  <img src="assets/teaser.png" width="900"/>
+</p>
+
+**Pipeline**:
+1. Collect robot demonstrations (teleoperation).
+2. Extract human actions from videos and retarget to the robot action space.
+3. Map human ↔ robot trajectories with DTW (action-based or visual-based).
+4. MixUp interpolate paired trajectories in latent and action space.
+5. Co-train diffusion policy on robot demos + interpolated human data.
 
 
 ## Setup
