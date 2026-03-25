@@ -112,11 +112,15 @@ class EnvGibsonMOMART(EB.EnvBase):
         # Set device idx for rendering
         # ensure that we select the correct GPU device for rendering by testing for EGL rendering
         # NOTE: this package should be installed from this link (https://github.com/StanfordVL/egl_probe)
-        import egl_probe
-        device_idx = 0
-        valid_gpu_devices = egl_probe.get_available_devices()
-        if len(valid_gpu_devices) > 0:
-            device_idx = valid_gpu_devices[0]
+        import os
+        os.environ["MUJOCO_GL"] = "egl"
+        os.environ["EGL_VISIBLE_DEVICES"] = "0"
+
+        #import egl_probe
+        #device_idx = 0
+        #valid_gpu_devices = egl_probe.get_available_devices()
+        #if len(valid_gpu_devices) > 0:
+        #    device_idx = valid_gpu_devices[0]
 
         # Create environment
         self.env = envClass(
