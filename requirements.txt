@@ -16,7 +16,6 @@ datasets==4.3.0
 diffusers==0.11.1
 dill==0.4.0
 dtaidistance==2.3.13
-egl_probe==1.0.2
 etils==1.12.2
 evdev==1.9.1
 exceptiongroup==1.3.0
